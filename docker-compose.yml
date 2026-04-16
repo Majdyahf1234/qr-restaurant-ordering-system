@@ -1,0 +1,122 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: restaurant-postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-restaurant}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-restaurant123}
+      POSTGRES_DB: ${DB_NAME:-restaurant_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d
+      - ./database/backups:/backups
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-restaurant} -d ${DB_NAME:-restaurant_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - restaurant-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: restaurant-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - restaurant-network
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: restaurant-backend
+    environment:
+      DATABASE_URL: postgresql://restaurant:restaurant123@postgres:5432/restaurant_db?schema=public
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost}
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-restaurant}
+      DB_PASSWORD: ${DB_PASSWORD:-restaurant123}
+      DB_NAME: ${DB_NAME:-restaurant_db}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: ${JWT_SECRET:-your-super-secret-jwt-key-change-in-production}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-24h}
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - restaurant-network
+    restart: unless-stopped
+
+  # Frontend Applications (served via nginx)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: restaurant-frontend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./frontend/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+    networks:
+      - restaurant-network
+    restart: unless-stopped
+  
+  # Backup Service (runs daily backups)
+  backup:
+    image: postgres:15-alpine
+    container_name: restaurant-backup
+    environment:
+      POSTGRES_USER: ${DB_USER:-restaurant}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-restaurant123}
+      POSTGRES_DB: ${DB_NAME:-restaurant_db}
+      POSTGRES_HOST: postgres
+    volumes:
+      - ./database/backups:/backups
+      - ./scripts/backup.sh:/backup.sh:ro
+    command: >
+      sh -c "chmod +x /backup.sh && 
+             echo '0 2 * * * /backup.sh' | crontab - && 
+             crond -f"
+    depends_on:
+      - postgres
+    networks:
+      - restaurant-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  restaurant-network:
+    driver: bridge
